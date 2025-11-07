@@ -20,8 +20,8 @@ type Config struct {
 	Token     string
 	ChatID    string
 	Note      string
-	Always    string // "1" or "0"
-	ParseMode string // HTML
+	Always    string
+	ParseMode string
 	Timeout   time.Duration
 	Retries   int
 	Backoff   time.Duration
@@ -37,14 +37,12 @@ func main() {
 	}
 
 	cfg := loadConfig()
-
 	if cfg.Token == "" || cfg.ChatID == "" {
 		fmt.Fprintln(os.Stderr, "tg-exec: TOKEN/CHAT_ID not set (config or env)")
 		os.Exit(2)
 	}
 
 	loc := resolveLocation(cfg.Timezone)
-
 	cmdLine := strings.Join(os.Args[1:], " ")
 	start := time.Now().In(loc)
 
@@ -54,7 +52,6 @@ func main() {
 	cmd.Stderr = io.MultiWriter(os.Stderr, &buf)
 	err := cmd.Run()
 	rc := exitCode(err)
-
 	end := time.Now().In(loc)
 	duration := int(end.Sub(start).Seconds())
 
@@ -64,52 +61,49 @@ func main() {
 	}
 	escCmd := esc(cmdLine)
 	escNote := esc(cfg.Note)
+	escOut := esc(buf.String())
+
+	if len(escOut) > 3500 {
+		escOut = tailString(escOut, 3500)
+	}
 
 	tfmt := "2006-01-02 15:04:05 MST"
 	var msg string
-	escOut := esc(buf.String())
-
 	if rc != 0 {
-		// Command failed — всегда шлём с выводом
 		msg = fmt.Sprintf("❌ <b>Command failed</b>\nCommand: <pre>%s</pre>\n", escCmd)
-		if escNote != "" {
-			msg += fmt.Sprintf("Note: <b>%s</b>\n", escNote)
-		}
-		msg += fmt.Sprintf(
-			"Start time: %s\nEnd time: %s\nDuration: %d sec.\nExit code: %d\nOutput:\n<pre>%s</pre>",
-			start.Format(tfmt), end.Format(tfmt), duration, rc, escOut)
-
 	} else {
-		// Command succeeded — коротко
 		msg = fmt.Sprintf("✅ <b>Command completed successfully</b>\nCommand: <pre>%s</pre>\n", escCmd)
-		if escNote != "" {
-			msg += fmt.Sprintf("Note: <b>%s</b>\n", escNote)
-		}
-		msg += fmt.Sprintf(
-			"Start time: %s\nEnd time: %s\nDuration: %d sec.\nExit code: %d",
-			start.Format(tfmt), end.Format(tfmt), duration, rc)
+	}
+	if escNote != "" {
+		msg += fmt.Sprintf("Note: <b>%s</b>\n", escNote)
+	}
+	msg += fmt.Sprintf("Start time: %s\nEnd time: %s\nDuration: %d sec.\nExit code: %d",
+		start.Format(tfmt), end.Format(tfmt), duration, rc)
 
-		// Если ALWAYS=1 — добавить вывод
-		if cfg.Always == "1" && strings.TrimSpace(escOut) != "" {
-			msg += fmt.Sprintf("\nOutput:\n<pre>%s</pre>", escOut)
-		}
+	if rc != 0 || cfg.Always == "1" {
+		msg += fmt.Sprintf("\nOutput:\n<pre>%s</pre>", escOut)
 	}
 
-	if msg != "" {
-		debug(cfg, "Sending Telegram message to %s (token prefix: %.8s...)", cfg.ChatID, cfg.Token)
-		if err := sendTelegram(cfg, msg); err != nil {
-			fmt.Fprintf(os.Stderr, "tg-exec: failed to send Telegram message: %v\n", err)
-			if cfg.Strict {
-				os.Exit(70)
-			}
-		} else {
-			debug(cfg, "Telegram message sent successfully.")
+	debug(cfg, "Sending Telegram message to %s", cfg.ChatID)
+	if err := sendTelegram(cfg, msg); err != nil {
+		fmt.Fprintf(os.Stderr, "tg-exec: failed to send Telegram message: %v\n", err)
+		if cfg.Strict {
+			os.Exit(70)
 		}
-	} else {
-		debug(cfg, "No message composed — check ALWAYS setting.")
 	}
-
 	os.Exit(rc)
+}
+
+func tailString(s string, maxChars int) string {
+	if len(s) <= maxChars {
+		return s
+	}
+	s = s[len(s)-maxChars:]
+	lines := strings.SplitN(s, "\n", 2)
+	if len(lines) == 2 {
+		s = lines[1]
+	}
+	return fmt.Sprintf("[output truncated, showing last %d chars]\n%s", maxChars, s)
 }
 
 func exitCode(err error) int {
@@ -179,7 +173,6 @@ func loadKV(path string, kv map[string]string) {
 		return
 	}
 	defer f.Close()
-
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
@@ -196,13 +189,10 @@ func loadKV(path string, kv map[string]string) {
 		k := strings.TrimSpace(parts[0])
 		v := strings.Trim(strings.TrimSpace(parts[1]), `"`)
 		v = strings.TrimSpace(v)
-
-		// Простая обработка $(hostname)
 		if strings.Contains(v, "$(hostname)") {
 			host, _ := os.Hostname()
 			v = strings.ReplaceAll(v, "$(hostname)", host)
 		}
-
 		kv[k] = v
 	}
 }
@@ -234,47 +224,28 @@ func debug(cfg Config, format string, args ...interface{}) {
 }
 
 func sendTelegram(cfg Config, text string) error {
-	debug(cfg, "Preparing to POST to Telegram API...")
-
 	form := url.Values{}
 	form.Set("chat_id", cfg.ChatID)
 	form.Set("text", text)
 	form.Set("parse_mode", cfg.ParseMode)
-
 	client := &http.Client{}
-	sleep := cfg.Backoff
-	if sleep <= 0 {
-		sleep = 2 * time.Second
-	}
-
 	for i := 0; i < cfg.Retries; i++ {
-		debug(cfg, "Attempt %d/%d (timeout=%v backoff=%v)", i+1, cfg.Retries, cfg.Timeout, sleep)
 		ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
-
 		req, _ := http.NewRequestWithContext(ctx, "POST",
 			"https://api.telegram.org/bot"+cfg.Token+"/sendMessage", strings.NewReader(form.Encode()))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
 		resp, err := client.Do(req)
 		if err == nil {
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			debug(cfg, "Telegram response: %d %s", resp.StatusCode, string(body))
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 && bytes.Contains(body, []byte(`"ok":true`)) {
 				cancel()
 				return nil
 			}
 			err = fmt.Errorf("http %d: %s", resp.StatusCode, string(body))
-		} else {
-			debug(cfg, "HTTP request failed: %v", err)
 		}
-
 		cancel()
-		if i == cfg.Retries-1 {
-			return err
-		}
-		time.Sleep(sleep)
-		sleep *= 2
+		time.Sleep(cfg.Backoff)
 	}
 	return fmt.Errorf("retries exceeded")
 }

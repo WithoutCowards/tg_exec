@@ -1,3 +1,8 @@
+## 1.0.3
+* Added smart truncation for long command outputs (keeps last lines)
+* Prevented Telegram 400 errors for messages >4096 chars
+* Improved reliability for large CI logs and cron jobs
+
 ## 1.0.2
 * Fixed: ALWAYS=0 now sends minimal message without output
 * Fixed: NOTE="$(hostname)" now correctly resolves hostname

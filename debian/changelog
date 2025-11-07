@@ -1,3 +1,11 @@
+tg-exec (1.0.3) stable; urgency=medium
+
+  * Added smart truncation for long command outputs (keeps last lines)
+  * Prevented Telegram 400 errors for messages >4096 chars
+  * Improved reliability for large CI logs and cron jobs
+
+ -- WithoutCowards <withoutcowards@gmail.com> Sat, 04 Nov 2025 03:20:00 +0000
+
 tg-exec (1.0.2) stable; urgency=medium
 
   * Fixed: ALWAYS=0 now sends minimal message without output
@@ -5,7 +13,7 @@ tg-exec (1.0.2) stable; urgency=medium
   * Added: DEBUG=1 environment variable to show debug info
   * Cleaned up internal logging and message logic
 
- -- WithoutCowards <withoutcowards@gmail.com>  Sat, 04 Nov 2025 00:25:00 +0500
+ -- WithoutCowards <withoutcowards@gmail.com>  Sat, 04 Nov 2025 00:25:00 +0000
 
 tg-exec (1.0.1) stable; urgency=medium
 
