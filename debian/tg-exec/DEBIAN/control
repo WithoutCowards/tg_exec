@@ -2,7 +2,7 @@ Package: tg-exec
 Version: 1.0.3
 Architecture: amd64
 Maintainer: WithoutCowards
-Installed-Size: 4894
+Installed-Size: 4890
 Depends: ca-certificates
 Section: utils
 Priority: optional
