@@ -1,16 +1,159 @@
-.TH tg-exec 1 "November 2025" "tg-exec 1.0.0" "User Commands"
+.TH TG-EXEC 1 "October 2026" "tg-exec 2.0.0" "User Commands"
 .SH NAME
-tg-exec \- run a command and notify Telegram (Go)
+tg-exec \- run a command and report the result to Telegram
 .SH SYNOPSIS
 .B tg-exec
-[command ...]
+[\fIoptions\fR]
+.B \-\-
+.I program
+[\fIargs\fR...]
+.br
+.B tg-exec
+[\fIoptions\fR]
+.RI \(dq command\ line \(dq
+.br
+.B tg-exec
+.BR \-\-setup " | " \-\-check " | " \-\-seal " | " \-\-version
 .SH DESCRIPTION
-Executes a command, prints output to terminal (tee), and sends a Telegram notification.
-Includes full output only on failure.
+.B tg-exec
+runs a command, mirrors its output to the terminal and sends a Telegram
+message when it finishes: status, exit code, duration, host and the tail of
+the output. When the output does not fit into one message, the full log is
+attached as a file. The exit code of the command is passed through, so
+.B tg-exec
+can wrap jobs in cron, systemd timers and CI without changing their result.
+.PP
+With several arguments (or after \fB\-\-\fR) the program is executed
+directly and every argument is kept as is. With a single argument the string
+is run by \fBbash \-c\fR (or \fB/bin/sh\fR), so pipes, redirections and
+\fB&&\fR work.
+.PP
+A misconfigured notification never prevents the command from running: the
+command is executed and the problem is reported on stderr.
+.SH OPTIONS
+.TP
+.BR \-n ", " \-\-note " \fITEXT\fR"
+Label shown in the message (default: host name).
+.TP
+.BI \-\-chat " ID"
+Chat id: user, group (\-100...) or @channel.
+.TP
+.BI \-\-thread " ID"
+Forum topic id in a supergroup with topics.
+.TP
+.BI \-\-notify " always|failure"
+When to send a message. \fB\-\-on\-failure\fR is a shortcut for \fBfailure\fR.
+.TP
+.BI \-\-output " always|failure|never"
+When to include the command output.
+.TP
+.BI \-\-attach " auto|always|never"
+Send the full output as a .log file: \fBauto\fR does it when the output does
+not fit into the message (up to 45 MB).
+.TP
+.B \-\-silent
+Deliver successful runs without sound.
+.TP
+.BR \-t ", " \-\-timeout " \fIDURATION\fR"
+Stop the command after \fIDURATION\fR (90s, 30m, 2h): SIGTERM, then SIGKILL
+after 10 seconds. Exit code 124.
+.TP
+.BI \-\-lang " ru|en"
+Message language.
+.TP
+.BI \-\-proxy " URL"
+\fBhttp://\fR, \fBhttps://\fR, \fBsocks5://\fR or \fBsocks5h://\fR proxy,
+optionally with \fIuser:password@\fR; \fBnone\fR for a direct connection.
+.TP
+.BI \-\-config " FILE"
+Additional config file with the highest file priority.
+.TP
+.BR \-c ", " \-\-shell
+Join all arguments and run them via the shell.
+.TP
+.B \-\-dry\-run
+Print the message to stderr instead of sending it.
+.TP
+.B \-\-strict
+Exit with 70 if the command succeeded but the message could not be sent.
+A failing command keeps its own exit code.
+.TP
+.B \-\-debug
+Diagnostics on stderr.
+.TP
+.B \-\-setup
+Interactive setup: proxy, token check, chat discovery from recent messages to
+the bot, label, language, test message. As root writes
+\fI/etc/tg\-exec/config.conf\fR and offers to seal the token.
+.TP
+.B \-\-check
+Print the effective settings with their sources, check the token and send a
+silent test message.
+.TP
+.B \-\-seal
+Encrypt the token with \fBsystemd\-creds\fR(1) into
+\fI/etc/tg\-exec/token.cred\fR and replace \fBTOKEN\fR in the config with a
+\fBTOKEN_CMD\fR that decrypts it. Requires root.
 .SH CONFIGURATION
-Global: /etc/tg-exec/config.conf
-User: ~/.config/tg-exec/config.conf
-.SH ENV
-TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TG_NOTE, TG_EXEC_ALWAYS, TG_EXEC_PARSE_MODE, TG_EXEC_TZ, TG_EXEC_HTTP_TIMEOUT, TG_EXEC_RETRIES, TG_EXEC_BACKOFF, TG_EXEC_STRICT.
+Settings are merged from (low to high priority):
+\fI/etc/tg\-exec/config.conf\fR, \fI~/.config/tg\-exec/config.conf\fR
+(\fI$XDG_CONFIG_HOME\fR), \fB\-\-config\fR, environment variables
+\fBTG_EXEC_\fIKEY\fR, command-line options.
+Files use \fBKEY="value"\fR lines; \fB$(hostname)\fR expands to the host name.
+.TP
+.BR TOKEN ", " TOKEN_FILE ", " TOKEN_CMD
+Bot token, a file with it, or a command that prints it (like aws-cli
+credential_process: \fBvault\fR, \fBpass\fR, \fBsystemd\-creds decrypt\fR).
+The highest-priority source that sets any of the three wins. A systemd
+credential named \fBtg\-exec\-token\fR (\fBLoadCredentialEncrypted=\fR) is used
+first. \fBTELEGRAM_BOT_TOKEN\fR is also accepted.
+.TP
+.BR CHAT_ID ", " THREAD_ID ", " NOTE
+Destination and label. \fBTELEGRAM_CHAT_ID\fR is also accepted.
+.TP
+.BR NOTIFY ", " OUTPUT ", " ATTACH ", " SILENT_SUCCESS ", " LANG ", " TIMEZONE
+Same as the options above. \fBALWAYS=1|0\fR (version 1) maps to
+\fBOUTPUT=always|failure\fR.
+.TP
+.BR TIMEOUT ", " SHELL
+Command timeout and the shell for single-string commands.
+.TP
+.BR PROXY ", " API_URL ", " CA_FILE
+Proxy; own Bot API server or reverse proxy for closed networks; extra PEM CA
+bundle. Without \fBPROXY\fR the standard \fBHTTPS_PROXY\fR, \fBALL_PROXY\fR
+and \fBNO_PROXY\fR variables apply.
+.TP
+.BR HTTP_TIMEOUT ", " RETRIES ", " BACKOFF
+Per-request timeout, total attempts (429 \fIretry_after\fR is respected),
+first pause between attempts (doubles).
+.TP
+.BR STRICT ", " DEBUG
+See \fB\-\-strict\fR and \fB\-\-debug\fR.
+.SH SECURITY
+A token that the program can read without a password can also be read by
+whoever controls the account it runs as; encryption protects against stolen
+disks and backups, not against root on a live host. Keep the config at mode
+0600 (tg-exec warns otherwise), use a dedicated bot for notifications, and
+prefer \fB\-\-seal\fR or \fBLoadCredentialEncrypted=\fR on servers.
 .SH EXIT STATUS
-Returns the exit code of the executed command; 70 if notification fails and TG_EXEC_STRICT=1.
+The exit code of the command; 128+N if it was killed by signal N; 124 on
+timeout; 127/126 if it could not be started; 70 with \fB\-\-strict\fR when a
+successful run could not be reported; 2 on usage errors.
+.SH EXAMPLES
+.nf
+tg\-exec \-\- apt\-get \-y upgrade
+tg\-exec \-\-on\-failure "pg_dump app | gzip > /backup/app.sql.gz"
+0 3 * * * tg\-exec \-n backup \-t 2h \-\- /usr/local/bin/backup.sh
+TG_EXEC_PROXY=socks5h://127.0.0.1:1080 tg\-exec make release
+.fi
+.SH FILES
+.I /etc/tg\-exec/config.conf
+.br
+.I ~/.config/tg\-exec/config.conf
+.br
+.I /etc/tg\-exec/token.cred
+.SH SEE ALSO
+.BR systemd\-creds (1),
+.BR systemd.exec (5)
+.PP
+https://runstack.ru/p/tg\-exec
