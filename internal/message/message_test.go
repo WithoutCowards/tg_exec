@@ -140,3 +140,30 @@ func TestPlain(t *testing.T) {
 		t.Errorf("plain: %q", p)
 	}
 }
+
+func TestLongNoteStillFits(t *testing.T) {
+	r := baseReport()
+	r.Note = strings.Repeat("очень длинная подпись ", 400)
+	r.Host = "other"
+	r.Output = []byte(strings.Repeat("x\n", 3000))
+	msg, cut := r.Render()
+	if VisibleLen(msg) > MaxText || !cut {
+		t.Fatalf("len=%d cut=%v", VisibleLen(msg), cut)
+	}
+	if VisibleLen(r.Caption(45<<20)) > MaxCaption {
+		t.Fatal("caption too long")
+	}
+}
+
+func TestRenderCutFlag(t *testing.T) {
+	r := baseReport()
+	r.Output = []byte("short")
+	if _, cut := r.Render(); cut {
+		t.Fatal("short output reported as cut")
+	}
+	r.Command = strings.Repeat("x", 900)
+	r.Output = []byte(strings.Repeat("строка\n", 500)) // fits by runes, not after a long command
+	if _, cut := r.Render(); !cut {
+		t.Fatal("cut not reported")
+	}
+}

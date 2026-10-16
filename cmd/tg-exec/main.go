@@ -13,13 +13,13 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
-	"unicode/utf8"
 
 	"tg-exec/internal/config"
 	"tg-exec/internal/message"
 	"tg-exec/internal/runner"
 	"tg-exec/internal/secret"
 	"tg-exec/internal/telegram"
+	"tg-exec/internal/tty"
 )
 
 var version = "dev"
@@ -65,6 +65,12 @@ Config: /etc/tg-exec/config.conf, ~/.config/tg-exec/config.conf, --config;
 environment TG_EXEC_<KEY> overrides files. See man tg-exec.
 The command's exit code is passed through.
 `
+
+// valueFlags take an argument (so "-n --" means note "--").
+var valueFlags = map[string]bool{
+	"n": true, "note": true, "chat": true, "thread": true, "notify": true, "output": true, "attach": true,
+	"timeout": true, "t": true, "lang": true, "proxy": true, "config": true,
+}
 
 type opts struct {
 	note, chat, thread, notify, output, attach, timeout, lang, proxy, cfgPath string
@@ -117,7 +123,9 @@ func run(args []string) int {
 	}
 	rest := fs.Args()
 	consumed := len(args) - len(rest)
-	dashdash := consumed > 0 && args[consumed-1] == "--"
+	// "--" ended the options only if it was not the value of a flag (-n --).
+	dashdash := consumed > 0 && args[consumed-1] == "--" &&
+		!(consumed > 1 && valueFlags[strings.TrimLeft(args[consumed-2], "-")] && !strings.Contains(args[consumed-2], "="))
 
 	switch {
 	case help:
@@ -174,47 +182,38 @@ func run(args []string) int {
 
 func execute(o opts, flags map[string]string, rest []string, dashdash bool) int {
 	tty := isTerminal(os.Stderr)
-	var notifyErr error
 
-	cfg, err := config.Load(config.Options{ConfigPath: o.cfgPath, Flags: flags, SystemPath: systemConfig})
-	if err != nil {
-		notifyErr = err
-		cfg = nil
-	}
+	// Load always returns usable settings; an error only disables sending,
+	// never the job itself or its timeout/shell/strict settings.
+	cfg, notifyErr := config.Load(config.Options{ConfigPath: o.cfgPath, Flags: flags, SystemPath: systemConfig})
 	debugf := func(format string, args ...any) {
-		if cfg != nil && cfg.Debug {
+		if cfg.Debug {
 			fmt.Fprintf(os.Stderr, "[tg-exec] "+format+"\n", args...)
 		}
 	}
 	warn := func(w string) {
-		if tty || (cfg != nil && cfg.Debug) {
+		if tty || cfg.Debug {
 			fmt.Fprintln(os.Stderr, "tg-exec: warning:", w)
 		}
 	}
-	if cfg != nil {
-		for _, w := range cfg.Warnings {
-			warn(w)
-		}
+	for _, w := range cfg.Warnings {
+		warn(w)
 	}
-
-	var tok secret.Token
-	if notifyErr == nil {
-		tok, err = secret.Resolve(cfg, nil, warn)
-		if err != nil && !o.dryRun {
-			notifyErr = err
-		}
-		if notifyErr == nil && cfg.ChatID == "" && !o.dryRun {
-			notifyErr = errors.New("chat is not set (CHAT_ID or --chat); run: tg-exec --setup")
-		}
+	if notifyErr == nil && cfg.ChatID == "" && !o.dryRun {
+		notifyErr = errors.New("chat is not set (CHAT_ID or --chat); run: tg-exec --setup")
 	}
 	if notifyErr != nil {
 		// Never block the job itself because of notification settings.
 		fmt.Fprintf(os.Stderr, "tg-exec: notification disabled: %v\n", notifyErr)
 	}
 
-	spec := runner.Spec{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}
+	spec := runner.Spec{
+		Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr,
+		Timeout: cfg.Timeout,
+		Group:   !isTerminal(os.Stdin), // keep terminal job control (Ctrl-C) interactive
+	}
 	var display string
-	if !dashdash && (o.shell || len(rest) == 1) {
+	if o.shell || (!dashdash && len(rest) == 1) {
 		spec.Command = strings.Join(rest, " ")
 		spec.Shell = pickShell(cfg)
 		display = spec.Command
@@ -222,13 +221,10 @@ func execute(o opts, flags map[string]string, rest []string, dashdash bool) int 
 		spec.Args = rest
 		display = runner.ShellQuote(rest)
 	}
-	if cfg != nil {
-		spec.Timeout = cfg.Timeout
-		if notifyErr == nil && cfg.Attach != "never" && cfg.Output != "never" {
-			spec.SpoolLimit = spoolLimit
-		}
+	if notifyErr == nil && cfg.Attach != "never" && cfg.Output != "never" {
+		spec.SpoolLimit = spoolLimit
 	}
-	debugf("run: %s (shell=%q, timeout=%v)", display, spec.Shell, spec.Timeout)
+	debugf("run: %s (shell=%q, timeout=%v, group=%v)", display, spec.Shell, spec.Timeout, spec.Group)
 
 	res := runner.Run(spec)
 	if res.SpoolPath != "" {
@@ -239,7 +235,7 @@ func execute(o opts, flags map[string]string, rest []string, dashdash bool) int 
 	}
 	code := res.ExitCode
 	failCode := func() int {
-		if cfg != nil && cfg.Strict && code == 0 {
+		if cfg.Strict && code == 0 {
 			return 70
 		}
 		return code
@@ -270,15 +266,11 @@ func execute(o opts, flags map[string]string, rest []string, dashdash bool) int 
 	if res.StartErr != nil {
 		rep.StartErr = res.StartErr.Error()
 	}
-	if include && res.SpoolPath != "" {
-		switch cfg.Attach {
-		case "always":
-			rep.Attached = true
-		case "auto":
-			rep.Attached = rep.OutputPartial || utf8.RuneCountInString(message.CleanOutput(res.Tail)) > 3000
-		}
+	text, cut := rep.Render()
+	if include && res.SpoolPath != "" && (cfg.Attach == "always" || (cfg.Attach == "auto" && cut)) {
+		rep.Attached = true
+		text, _ = rep.Render()
 	}
-	text := rep.Build()
 
 	if o.dryRun {
 		fmt.Fprintln(os.Stderr, "----- tg-exec: message (dry run) -----")
@@ -289,6 +281,13 @@ func execute(o opts, flags map[string]string, rest []string, dashdash bool) int 
 		return code
 	}
 
+	// The token is resolved only now: TOKEN_CMD (vault, KMS…) is not called
+	// for runs that send nothing and never delays the job.
+	tok, err := secret.Resolve(cfg, nil, warn)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "tg-exec: notification disabled: %v\n", err)
+		return failCode()
+	}
 	client, err := newClient(cfg, tok.Value, debugf)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "tg-exec: %v\n", err)
@@ -340,7 +339,7 @@ func newClient(cfg *config.Config, token string, debugf func(string, ...any)) (*
 }
 
 func pickShell(cfg *config.Config) string {
-	if cfg != nil && cfg.Shell != "" {
+	if cfg.Shell != "" {
 		return cfg.Shell
 	}
 	if p, err := exec.LookPath("bash"); err == nil {
@@ -349,7 +348,4 @@ func pickShell(cfg *config.Config) string {
 	return "/bin/sh"
 }
 
-func isTerminal(f *os.File) bool {
-	st, err := f.Stat()
-	return err == nil && st.Mode()&os.ModeCharDevice != 0
-}
+func isTerminal(f *os.File) bool { return tty.Is(f) }

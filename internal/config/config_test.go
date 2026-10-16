@@ -170,3 +170,30 @@ func TestWriteFileMode(t *testing.T) {
 		t.Errorf("mode %v", st.Mode())
 	}
 }
+
+func TestReviewRegressions(t *testing.T) {
+	d := t.TempDir()
+	sys := write(t, d, "sys.conf", "TOKEN=\"1:x\"\nCHAT_ID=\"5\"\n", 0o600)
+	usr := write(t, d, "usr.conf", DefaultFile+"\nTHREAD_ID= # topic\n", 0o600)
+	c, err := Load(Options{SystemPath: sys, UserPath: usr, Env: envOf(map[string]string{"DEBUG": "express:*"})})
+	if err != nil {
+		t.Fatalf("DEBUG=express:* or an empty template must not break the config: %v", err)
+	}
+	if c.ChatID != "5" || c.Raw.Get("TOKEN") != "1:x" || c.ThreadID != 0 || c.Debug {
+		t.Fatalf("template wiped lower layer: chat=%q token=%q thread=%d debug=%v", c.ChatID, c.Raw.Get("TOKEN"), c.ThreadID, c.Debug)
+	}
+	c, _ = Load(Options{SystemPath: "-", UserPath: "-", Env: envOf(map[string]string{"DEBUG": "1"})})
+	if !c.Debug {
+		t.Error("DEBUG=1 must still work")
+	}
+	// Invalid values keep a usable config with the valid parts.
+	c, err = Load(Options{ConfigPath: d + "/missing.conf", SystemPath: "-", UserPath: "-",
+		Env: envOf(map[string]string{"TG_EXEC_LANG": "de"}), Flags: map[string]string{"TIMEOUT": "1s", "STRICT": "1"}})
+	if err == nil || c == nil || c.Timeout != time.Second || !c.Strict {
+		t.Fatalf("partial config lost: err=%v cfg=%+v", err, c)
+	}
+	out := Update("TELEGRAM_BOT_TOKEN=\"123:secret\"\nTG_EXEC_TZ=UTC\n", map[string]string{"TOKEN_CMD": "x", "TIMEZONE": "Europe/Moscow"}, []string{"TOKEN", "TOKEN_FILE"})
+	if strings.Contains(out, "secret") || strings.Contains(out, "UTC") {
+		t.Fatalf("legacy keys not normalised:\n%s", out)
+	}
+}

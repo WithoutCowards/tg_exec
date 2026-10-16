@@ -117,6 +117,8 @@ func UserPath(env func(string) string) string {
 }
 
 // Load merges defaults < system file < user file < --config file < env < flags.
+// It always returns a Config; on error the invalid values fall back to their
+// defaults, so the caller can still run the job with the valid settings.
 func Load(o Options) (*Config, error) {
 	if o.Env == nil {
 		o.Env = os.Getenv
@@ -132,6 +134,7 @@ func Load(o Options) (*Config, error) {
 	}
 
 	cfg := &Config{Raw: Set{}, env: o.Env}
+	var fileErr error
 	paths := []string{o.SystemPath, o.UserPath}
 	if o.ConfigPath != "" {
 		paths = append(paths, o.ConfigPath)
@@ -146,18 +149,27 @@ func Load(o Options) (*Config, error) {
 		quiet := errors.Is(fi.Err, fs.ErrNotExist) || errors.Is(fi.Err, fs.ErrPermission)
 		if fi.Err != nil && (explicit || !quiet) {
 			if explicit {
-				return nil, fmt.Errorf("config %s: %w", p, fi.Err)
+				fileErr = fmt.Errorf("config %s: %w", p, fi.Err)
+			} else {
+				cfg.warn("config %s: %v", p, fi.Err)
 			}
-			cfg.warn("config %s: %v", p, fi.Err)
+			cfg.Files = append(cfg.Files, fi)
+			continue
 		}
 		cfg.Files = append(cfg.Files, fi)
 	}
 
 	env := Set{}
 	for _, l := range legacyEnv {
-		if v := o.Env(l[0]); v != "" {
-			env[l[1]] = Value{v, "env " + l[0]}
+		v := o.Env(l[0])
+		if v == "" {
+			continue
 		}
+		// A bare DEBUG is shared with other tools (DEBUG=express:*): only 1/0 counts.
+		if l[0] == "DEBUG" && !isBoolWord(v) {
+			continue
+		}
+		env[l[1]] = Value{v, "env " + l[0]}
 	}
 	if v := o.Env("TG_EXEC_ALWAYS"); v != "" {
 		env["ALWAYS"] = Value{v, "env TG_EXEC_ALWAYS"}
@@ -175,7 +187,7 @@ func Load(o Options) (*Config, error) {
 	}
 	cfg.merge(flags)
 
-	return cfg, cfg.resolve()
+	return cfg, errors.Join(fileErr, cfg.resolve())
 }
 
 func (c *Config) warn(format string, args ...any) {
@@ -218,7 +230,10 @@ func (c *Config) loadFile(path string) FileInfo {
 			c.warn("%s:%d: unknown setting %s (ignored)", path, e.Line, e.Key)
 			continue
 		}
-		if k == "TOKEN" && e.Value != "" {
+		if e.Value == "" {
+			continue // an empty template line must not wipe a lower layer
+		}
+		if k == "TOKEN" {
 			fi.HasToken = true
 		}
 		layer[k] = Value{e.Value, fmt.Sprintf("%s:%d", path, e.Line)}
@@ -348,6 +363,14 @@ func (c *Config) resolve() error {
 		return fmt.Errorf("invalid configuration:\n  %s", strings.Join(errs, "\n  "))
 	}
 	return nil
+}
+
+func isBoolWord(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "0", "true", "false", "yes", "no", "on", "off":
+		return true
+	}
+	return false
 }
 
 func choice(r Set, k, def string, allowed []string, bad func(string, string)) string {

@@ -119,6 +119,14 @@ func (r Report) Header() string {
 
 // Build renders the message. It always fits Telegram's 4096 limit.
 func (r Report) Build() string {
+	msg, _ := r.Render()
+	return msg
+}
+
+// Render is Build that also reports whether the output had to be cut.
+func (r Report) Render() (string, bool) {
+	r.Note = shorten(r.Note, 200)
+	r.Host = shorten(r.Host, 200)
 	t := r.t()
 	loc := r.Location
 	if loc == nil {
@@ -150,7 +158,7 @@ func (r Report) Build() string {
 		b.WriteString("\n<pre>" + Esc(cutUTF16(r.StartErr, 500)) + "</pre>")
 	}
 	if !r.IncludeOutput {
-		return b.String()
+		return b.String(), false
 	}
 
 	out := CleanOutput(r.Output)
@@ -158,7 +166,7 @@ func (r Report) Build() string {
 		if r.StartErr == "" {
 			b.WriteString("\n💬 <i>" + t.noOutput + "</i>")
 		}
-		return b.String()
+		return b.String(), false
 	}
 
 	base := b.String()
@@ -184,9 +192,17 @@ func (r Report) Build() string {
 	msg := base + "\n💬 " + title + ":\n<pre>" + Esc(shown) + "</pre>" + tail
 	for VisibleLen(msg) > MaxText && len(shown) > 0 {
 		shown, _ = TailUTF16(shown, utf16Len(shown)-200)
+		cut = true
 		msg = base + "\n💬 " + title + ":\n<pre>" + Esc(shown) + "</pre>" + tail
 	}
-	return msg
+	return msg, cut || r.OutputPartial
+}
+
+func shorten(s string, n int) string {
+	if utf16Len(s) <= n {
+		return s
+	}
+	return cutUTF16(s, n) + "…"
 }
 
 // Plain is a fallback rendering without markup.
@@ -200,10 +216,13 @@ func Plain(htmlText string) string {
 func (r Report) Caption(limit int64) string {
 	c := "📎 " + r.t().caption
 	if r.Note != "" {
-		c += " · " + Esc(r.Note)
+		c += " · " + Esc(shorten(r.Note, 200))
 	}
 	if limit > 0 {
 		c += " (" + fmt.Sprintf(r.t().captionCut, HumanBytes(r.TotalBytes), HumanBytes(limit)) + ")"
+	}
+	if VisibleLen(c) > MaxCaption {
+		c = "📎 " + r.t().caption
 	}
 	return c
 }

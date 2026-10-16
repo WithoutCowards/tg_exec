@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -66,7 +67,7 @@ func IsParseError(err error) bool {
 func ProxyFunc(p string) (func(*http.Request) (*url.URL, error), string, error) {
 	switch strings.ToLower(p) {
 	case "":
-		return http.ProxyFromEnvironment, "from environment", nil
+		return envProxy, "from environment", nil
 	case "none":
 		return nil, "none (direct)", nil
 	}
@@ -82,10 +83,62 @@ func ProxyFunc(p string) (func(*http.Request) (*url.URL, error), string, error) 
 	return http.ProxyURL(u), RedactURL(p), nil
 }
 
+// envProxy is http.ProxyFromEnvironment plus ALL_PROXY / all_proxy as a
+// fallback (curl semantics), which Go itself ignores.
+func envProxy(req *http.Request) (*url.URL, error) {
+	if firstEnv("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy") != "" {
+		return http.ProxyFromEnvironment(req)
+	}
+	all := firstEnv("ALL_PROXY", "all_proxy")
+	if all == "" || noProxy(req.URL.Hostname()) {
+		return nil, nil
+	}
+	if !strings.Contains(all, "://") {
+		all = "http://" + all
+	}
+	return url.Parse(all)
+}
+
+func firstEnv(keys ...string) string {
+	for _, k := range keys {
+		if v := os.Getenv(k); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// noProxy implements the common NO_PROXY rules: "*", exact hosts, domain suffixes.
+func noProxy(host string) bool {
+	host = strings.ToLower(host)
+	for _, e := range strings.Split(firstEnv("NO_PROXY", "no_proxy"), ",") {
+		e = strings.ToLower(strings.TrimSpace(e))
+		if h, _, err := net.SplitHostPort(e); err == nil {
+			e = h
+		}
+		switch {
+		case e == "":
+		case e == "*":
+			return true
+		case host == strings.TrimPrefix(e, "."):
+			return true
+		case strings.HasSuffix(host, "."+strings.TrimPrefix(e, ".")):
+			return true
+		}
+	}
+	return false
+}
+
 // RedactURL hides the password in a URL.
 func RedactURL(s string) string {
 	u, err := url.Parse(s)
-	if err != nil || u.User == nil {
+	if err != nil {
+		if i := strings.LastIndex(s, "@"); i >= 0 {
+			return "xxxxx@" + s[i+1:] // unparsable but may carry credentials
+		}
+		return s
+	}
+	if u.User == nil {
 		return s
 	}
 	if _, ok := u.User.Password(); ok {
@@ -164,10 +217,14 @@ func (c *Client) redact(err error) error {
 }
 
 func (c *Client) call(ctx context.Context, method string, b body, out any) error {
+	return c.callT(ctx, method, b, out, c.o.Timeout)
+}
+
+func (c *Client) callT(ctx context.Context, method string, b body, out any, timeout time.Duration) error {
 	var last error
 	wait := c.o.Backoff
 	for attempt := 1; attempt <= c.o.Retries; attempt++ {
-		retry, after, err := c.once(ctx, method, b, out)
+		retry, after, err := c.once(ctx, method, b, out, timeout)
 		if err == nil {
 			return nil
 		}
@@ -196,7 +253,7 @@ func (c *Client) call(ctx context.Context, method string, b body, out any) error
 }
 
 // once performs a single request. retry tells whether another attempt may help.
-func (c *Client) once(ctx context.Context, method string, b body, out any) (retry bool, after time.Duration, err error) {
+func (c *Client) once(ctx context.Context, method string, b body, out any, timeout time.Duration) (retry bool, after time.Duration, err error) {
 	rd, ctype, err := b()
 	if err != nil {
 		return false, 0, err
@@ -204,7 +261,7 @@ func (c *Client) once(ctx context.Context, method string, b body, out any) (retr
 	if cl, ok := rd.(io.Closer); ok {
 		defer cl.Close()
 	}
-	ctx, cancel := context.WithTimeout(ctx, c.o.Timeout)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+method, rd)
 	if err != nil {
@@ -226,6 +283,9 @@ func (c *Client) once(ctx context.Context, method string, b body, out any) (retr
 	var ar apiResp
 	if jerr := json.Unmarshal(raw, &ar); jerr != nil {
 		snippet := strings.TrimSpace(string(raw))
+		if c.o.Token != "" {
+			snippet = strings.ReplaceAll(snippet, c.o.Token, "<token>")
+		}
 		if len(snippet) > 200 {
 			snippet = snippet[:200] + "…"
 		}
@@ -341,7 +401,12 @@ func (c *Client) SendDocument(ctx context.Context, t Target, path, filename, cap
 		}()
 		return pr, mw.FormDataContentType(), nil
 	}
-	return c.call(ctx, "sendDocument", b, nil)
+	// Uploads get extra time: at least 256 KiB/s on top of the request timeout.
+	timeout := c.o.Timeout
+	if st, err := os.Stat(path); err == nil {
+		timeout += time.Duration(st.Size()/(256<<10)+1) * time.Second
+	}
+	return c.callT(ctx, "sendDocument", b, nil, timeout)
 }
 
 // Chat is a chat seen in updates.

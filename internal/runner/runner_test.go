@@ -111,3 +111,80 @@ func TestShellQuote(t *testing.T) {
 		t.Fatalf("got %s", got)
 	}
 }
+
+func alive(pidfile string) bool {
+	b, err := os.ReadFile(pidfile)
+	if err != nil {
+		return false
+	}
+	var pid int
+	for _, c := range strings.TrimSpace(string(b)) {
+		pid = pid*10 + int(c-'0')
+	}
+	if pid <= 0 || syscall.Kill(pid, 0) != nil {
+		return false
+	}
+	// A killed orphan may linger as a zombie if init does not reap it.
+	if st, err := os.ReadFile("/proc/" + strings.TrimSpace(string(b)) + "/stat"); err == nil {
+		if f := strings.Fields(string(st)); len(f) > 2 && f[2] == "Z" {
+			return false
+		}
+	}
+	return true
+}
+
+func TestTimeoutKillsWholeGroup(t *testing.T) {
+	pf := t.TempDir() + "/pid"
+	start := time.Now()
+	r := Run(Spec{Shell: "/bin/sh", Command: "sleep 30 & echo $! > " + pf + "; sleep 30 | cat", Timeout: 300 * time.Millisecond,
+		Group: true, KillGrace: time.Second})
+	if r.ExitCode != 124 || !r.TimedOut {
+		t.Fatalf("code=%d timedOut=%v", r.ExitCode, r.TimedOut)
+	}
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("took %v", d)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if alive(pf) {
+		t.Fatal("background child survived the timeout")
+	}
+}
+
+func TestBackgroundChildIsNotATimeout(t *testing.T) {
+	start := time.Now()
+	r := Run(Spec{Shell: "/bin/sh", Command: "sleep 5 & echo started", Timeout: 2 * time.Second, Group: true,
+		KillGrace: 500 * time.Millisecond})
+	if r.ExitCode != 0 || r.TimedOut || string(r.Tail) != "started\n" {
+		t.Fatalf("code=%d timedOut=%v tail=%q", r.ExitCode, r.TimedOut, r.Tail)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("waited %v for a background child", d)
+	}
+}
+
+func TestForwardedTermReachesGroup(t *testing.T) {
+	pf := t.TempDir() + "/pid"
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		syscall.Kill(os.Getpid(), syscall.SIGTERM)
+	}()
+	r := Run(Spec{Shell: "/bin/sh", Command: "sleep 30 & echo $! > " + pf + "; wait", Group: true, KillGrace: time.Second})
+	if r.ExitCode == 0 {
+		t.Fatalf("code=%d", r.ExitCode)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if alive(pf) {
+		t.Fatal("SIGTERM was not forwarded to the background child")
+	}
+}
+
+type brokenWriter struct{}
+
+func (brokenWriter) Write([]byte) (int, error) { return 0, syscall.EPIPE }
+
+func TestBrokenTerminalKeepsCapturing(t *testing.T) {
+	r := Run(Spec{Shell: "/bin/sh", Command: "echo a; echo b; exit 3", Stdout: brokenWriter{}})
+	if r.ExitCode != 3 || string(r.Tail) != "a\nb\n" {
+		t.Fatalf("code=%d tail=%q", r.ExitCode, r.Tail)
+	}
+}

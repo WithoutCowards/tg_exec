@@ -5,7 +5,6 @@
 package runner
 
 import (
-	"context"
 	"errors"
 	"io"
 	"io/fs"
@@ -30,6 +29,7 @@ type Spec struct {
 	TailBytes  int   // bytes of output kept in memory (default 64 KiB)
 	SpoolLimit int64 // >0: also write output to a temp file up to this size
 	KillGrace  time.Duration
+	Group      bool // run in its own process group (use when stdin is not a terminal)
 }
 
 // Result is what happened.
@@ -74,41 +74,90 @@ func Run(s Spec) *Result {
 		}
 	}
 
-	ctx := context.Background()
-	cancel := func() {}
-	if s.Timeout > 0 {
-		ctx, cancel = context.WithTimeout(ctx, s.Timeout)
-	}
-	defer cancel()
-
 	var cmd *exec.Cmd
 	if s.Shell != "" {
-		cmd = exec.CommandContext(ctx, s.Shell, "-c", s.Command)
+		cmd = exec.Command(s.Shell, "-c", s.Command)
 	} else {
-		cmd = exec.CommandContext(ctx, s.Args[0], s.Args[1:]...)
+		cmd = exec.Command(s.Args[0], s.Args[1:]...)
 	}
 	cmd.Stdin = s.Stdin
+	if s.Group {
+		// Own process group: timeouts and forwarded signals reach pipelines
+		// and background children too, not just the shell.
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	}
+
+	// Our own pipes: Wait returns exactly when the process exits, even if a
+	// background child still holds the output open.
 	var mu sync.Mutex
-	cmd.Stdout = &locked{mu: &mu, w: s.Stdout, c: cp}
-	cmd.Stderr = &locked{mu: &mu, w: s.Stderr, c: cp}
-	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
-	cmd.WaitDelay = s.KillGrace
-
+	outR, outW, err1 := os.Pipe()
+	errR, errW, err2 := os.Pipe()
 	res := &Result{Start: time.Now()}
+	if err := errors.Join(err1, err2); err != nil {
+		res.End, res.StartErr, res.ExitCode = time.Now(), err, 1
+		cp.finish(res)
+		return res
+	}
+	cmd.Stdout, cmd.Stderr = outW, errW
 
-	// SIGINT/SIGQUIT from a terminal already reach the child (same process
-	// group); we only survive them to report. SIGTERM/SIGHUP sent to us
-	// (kill, systemd, closed ssh session) are forwarded.
-	sigs := make(chan os.Signal, 4)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGHUP)
+	// SIGPIPE must be caught, or a closed reader of our stdout (| head,
+	// restarted journald) kills tg-exec before it can report. A caught signal
+	// is reset to default in the child, so the job behaves as usual.
+	// SIGINT/SIGQUIT from a terminal reach the job directly (same process
+	// group); without a terminal they are forwarded like SIGTERM/SIGHUP.
+	sigs := make(chan os.Signal, 8)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGPIPE)
 	defer signal.Stop(sigs)
 
 	if err := cmd.Start(); err != nil {
+		outW.Close()
+		errW.Close()
+		outR.Close()
+		errR.Close()
 		res.End = time.Now()
 		res.StartErr = err
 		res.ExitCode = startExitCode(err)
 		cp.finish(res)
 		return res
+	}
+	outW.Close()
+	errW.Close()
+
+	pid := cmd.Process.Pid
+	kill := func(sig syscall.Signal) {
+		if s.Group {
+			_ = syscall.Kill(-pid, sig)
+		} else {
+			_ = cmd.Process.Signal(sig)
+		}
+	}
+
+	var copies sync.WaitGroup
+	for _, p := range []struct {
+		r *os.File
+		w io.Writer
+	}{{outR, s.Stdout}, {errR, s.Stderr}} {
+		copies.Add(1)
+		go func(r *os.File, w io.Writer) {
+			defer copies.Done()
+			_, _ = io.Copy(&locked{mu: &mu, w: w, c: cp}, r)
+		}(p.r, p.w)
+	}
+
+	var state sync.Mutex
+	exited, timedOut := false, false
+	var timer, killer *time.Timer
+	if s.Timeout > 0 {
+		timer = time.AfterFunc(s.Timeout, func() {
+			state.Lock()
+			defer state.Unlock()
+			if exited {
+				return
+			}
+			timedOut = true
+			kill(syscall.SIGTERM)
+			killer = time.AfterFunc(s.KillGrace, func() { kill(syscall.SIGKILL) })
+		})
 	}
 
 	done := make(chan struct{})
@@ -116,8 +165,13 @@ func Run(s Spec) *Result {
 		for {
 			select {
 			case sig := <-sigs:
-				if sig == syscall.SIGTERM || sig == syscall.SIGHUP {
-					_ = cmd.Process.Signal(sig)
+				switch sig {
+				case syscall.SIGTERM, syscall.SIGHUP:
+					kill(sig.(syscall.Signal))
+				case syscall.SIGINT, syscall.SIGQUIT:
+					if s.Group {
+						kill(sig.(syscall.Signal))
+					}
 				}
 			case <-done:
 				return
@@ -126,9 +180,42 @@ func Run(s Spec) *Result {
 	}()
 
 	err := cmd.Wait()
+	state.Lock()
+	exited = true
+	res.TimedOut = timedOut
+	if timer != nil {
+		timer.Stop()
+	}
+	state.Unlock()
 	close(done)
+
+	// Give background children a moment to finish writing, then stop reading:
+	// a daemon started without redirects must not hold up the report.
+	drain := time.Second
+	if res.TimedOut {
+		drain = s.KillGrace
+	}
+	finished := make(chan struct{})
+	go func() { copies.Wait(); close(finished) }()
+	select {
+	case <-finished:
+	case <-time.After(drain):
+		if res.TimedOut {
+			kill(syscall.SIGKILL)
+		}
+		outR.SetReadDeadline(time.Now())
+		errR.SetReadDeadline(time.Now())
+		<-finished
+	}
+	outR.Close()
+	errR.Close()
+	if res.TimedOut {
+		kill(syscall.SIGKILL) // whatever ignored SIGTERM in the group
+	}
+	if killer != nil {
+		killer.Stop()
+	}
 	res.End = time.Now()
-	res.TimedOut = s.Timeout > 0 && errors.Is(ctx.Err(), context.DeadlineExceeded)
 
 	if ps := cmd.ProcessState; ps != nil {
 		if ws, ok := ps.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
@@ -276,7 +363,11 @@ type locked struct {
 func (l *locked) Write(p []byte) (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	_, _ = l.w.Write(p) // a closed terminal must not kill the job
+	if l.w != nil {
+		if _, err := l.w.Write(p); err != nil {
+			l.w = nil // reader went away (EPIPE): keep capturing, stop mirroring
+		}
+	}
 	return l.c.Write(p)
 }
 

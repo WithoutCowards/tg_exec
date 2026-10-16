@@ -1,3 +1,5 @@
+//go:build unix
+
 // Package secret resolves the Telegram bot token from the configured source.
 //
 // Sources, first match wins:
@@ -22,6 +24,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"tg-exec/internal/config"
@@ -104,6 +107,10 @@ func runCmd(cmdline string) (string, error) {
 	cmd.Stdout = &out
 	cmd.Stderr = &errb
 	cmd.Stdin = nil
+	// Kill the whole group on timeout and do not wait for stray children.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.WaitDelay = time.Second
 	if err := cmd.Run(); err != nil {
 		msg := strings.TrimSpace(errb.String())
 		if len(msg) > 300 {

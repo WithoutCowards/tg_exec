@@ -184,8 +184,8 @@ func runSetup(cfgPath string, flags map[string]string) int {
 				p += tr(" (Enter — оставить ", " (Enter — keep ") + secret.Mask(cur) + ")"
 			}
 			t := askSecret(p)
-			if t == "" {
-				t = cur
+			if t == "" && attempt == 0 {
+				t = cur // keep the saved token only on the first prompt
 			}
 			if t == "" {
 				continue
@@ -302,7 +302,10 @@ func runSetup(cfgPath string, flags map[string]string) int {
 		return 1
 	}
 	if t.ChatID != chat {
-		_ = config.WriteFile(path, config.Update(newText, map[string]string{"CHAT_ID": t.ChatID}, nil))
+		// Re-read: --seal may have rewritten the file after newText was built.
+		if b, err := os.ReadFile(path); err == nil {
+			_ = config.WriteFile(path, config.Update(string(b), map[string]string{"CHAT_ID": t.ChatID}, nil))
+		}
 	}
 	ok(tr("тестовое сообщение отправлено", "test message sent"))
 	fmt.Println()
@@ -368,8 +371,13 @@ func pickChat(c *telegram.Client, curChat, curThread string) (string, string) {
 			return v, curThread
 		}
 		if strings.HasPrefix(v, "@") || isInt(v) {
-			th := ask(tr("ID темы форума (Enter — нет)", "Forum topic id (Enter — none)"), "")
-			return v, th
+			for {
+				th := ask(tr("ID темы форума (Enter — нет)", "Forum topic id (Enter — none)"), "")
+				if th == "" || isInt(th) {
+					return v, th
+				}
+				fail(tr("нужно число", "a number is expected"))
+			}
 		}
 		fail(tr("не понял, попробуйте ещё раз", "not understood, try again"))
 	}

@@ -63,7 +63,8 @@ if [ -z "$asset" ]; then
 fi
 
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT INT TERM
+trap 'rm -rf "$tmp"' EXIT
+trap 'rm -rf "$tmp"; exit 130' INT TERM
 
 say "downloading ${asset}"
 fetch "${BASE}/${asset}" "$tmp/${asset}" || die "download failed: ${BASE}/${asset}"
@@ -80,7 +81,14 @@ fi
 say "checksum OK"
 
 case "$method" in
-	deb) dpkg -i "$tmp/${asset}" >/dev/null ;;
+	deb)
+		# apt-get resolves dependencies (ca-certificates); plain dpkg is the fallback.
+		if command -v apt-get >/dev/null 2>&1; then
+			DEBIAN_FRONTEND=noninteractive apt-get install -y -q "$tmp/${asset}" >/dev/null
+		else
+			dpkg -i "$tmp/${asset}" >/dev/null
+		fi
+		;;
 	rpm) rpm -U --replacepkgs "$tmp/${asset}" ;;
 	apk) apk add --no-network --allow-untrusted "$tmp/${asset}" >/dev/null ;;
 	binary)
@@ -111,7 +119,7 @@ case "$method" in
 		;;
 esac
 
-say "installed: $(command -v tg-exec 2>/dev/null || echo "$bindir/tg-exec") ($(tg-exec --version 2>/dev/null || "$bindir/tg-exec" --version))"
+say "installed: ${bindir}/tg-exec ($("$bindir/tg-exec" --version))"
 if [ "$uid" -eq 0 ]; then
 	say "next: tg-exec --setup"
 else

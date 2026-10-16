@@ -333,3 +333,39 @@ func TestProxyValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestAllProxyFallback(t *testing.T) {
+	_, srv, ca := newTLSAPI(t)
+	var used atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		used.Add(1)
+		up, err := net.Dial("tcp", r.Host)
+		if err != nil {
+			w.WriteHeader(502)
+			return
+		}
+		w.WriteHeader(200)
+		conn, _, _ := w.(http.Hijacker).Hijack()
+		pipe(conn, up)
+	}))
+	defer proxy.Close()
+	for _, k := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"} {
+		t.Setenv(k, "")
+	}
+	t.Setenv("ALL_PROXY", proxy.URL)
+	c, _ := New(Options{Token: tok, APIURL: srv.URL, CAFile: ca, Retries: 1})
+	if _, err := c.GetMe(context.Background()); err != nil || used.Load() == 0 {
+		t.Fatalf("ALL_PROXY ignored: err=%v used=%d", err, used.Load())
+	}
+	t.Setenv("NO_PROXY", "127.0.0.1")
+	n := used.Load()
+	if _, err := c.GetMe(context.Background()); err != nil || used.Load() != n {
+		t.Fatalf("NO_PROXY ignored: err=%v", err)
+	}
+}
+
+func TestRedactUnparsable(t *testing.T) {
+	if r := RedactURL("socks5://us er:pa ss@host:1"); strings.Contains(r, "pa ss") {
+		t.Fatalf("leaked: %s", r)
+	}
+}

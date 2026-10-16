@@ -22,6 +22,20 @@ func Quote(v string) string {
 
 var assignRe = regexp.MustCompile(`^\s*(?:export\s+)?(?:TG_EXEC_)?([A-Za-z_][A-Za-z0-9_]*)\s*=`)
 
+// canonical maps legacy key names to the current ones.
+func canonical(k string) string {
+	k = strings.ToUpper(k)
+	switch k {
+	case "TELEGRAM_BOT_TOKEN":
+		return "TOKEN"
+	case "TELEGRAM_CHAT_ID":
+		return "CHAT_ID"
+	case "TZ":
+		return "TIMEZONE"
+	}
+	return k
+}
+
 // Update rewrites a config text: keys in set are assigned (first active
 // assignment replaced in place, otherwise a commented "#KEY=" template line is
 // activated, otherwise appended), keys in remove are dropped. Comments and
@@ -36,7 +50,7 @@ func Update(text string, set map[string]string, remove []string) string {
 	var out []string
 	for _, l := range lines {
 		if m := assignRe.FindStringSubmatch(l); m != nil {
-			k := strings.ToUpper(m[1])
+			k := canonical(m[1])
 			if v, ok := set[k]; ok {
 				if !done[k] {
 					out = append(out, k+"="+Quote(v))
@@ -57,7 +71,7 @@ func Update(text string, set map[string]string, remove []string) string {
 			continue
 		}
 		if m := assignRe.FindStringSubmatch(strings.TrimPrefix(t, "#")); m != nil {
-			k := strings.ToUpper(m[1])
+			k := canonical(m[1])
 			if v, ok := set[k]; ok && !done[k] {
 				out[i] = k + "=" + Quote(v)
 				done[k] = true

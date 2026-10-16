@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 const testToken = "123456:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
@@ -172,5 +173,46 @@ func TestTokenCmd(t *testing.T) {
 	a := setup(t, "TOKEN_CMD=\"printf '"+testToken+"\\n'\"\nCHAT_ID=1\n")
 	if code := run([]string{"true"}); code != 0 || len(a.got) != 1 {
 		t.Fatalf("code=%d got=%d", code, len(a.got))
+	}
+}
+
+func TestBrokenConfigKeepsTimeoutAndStrict(t *testing.T) {
+	setup(t, "TOKEN=\""+testToken+"\"\nCHAT_ID=1\nLANG=de\n")
+	start := time.Now()
+	if code := run([]string{"-t", "300ms", "--", "sleep", "5"}); code != 124 {
+		t.Fatalf("timeout lost on config error: %d", code)
+	}
+	if time.Since(start) > 3*time.Second {
+		t.Fatal("too slow")
+	}
+	if code := run([]string{"--strict", "true"}); code != 70 {
+		t.Fatalf("strict lost on config error: %d", code)
+	}
+}
+
+func TestShellFlagWithDashDash(t *testing.T) {
+	a := setup(t, "TOKEN=\""+testToken+"\"\nCHAT_ID=1\n")
+	if code := run([]string{"-c", "--", "echo", "a", "|", "tr", "a", "b"}); code != 0 {
+		t.Fatalf("code %d", code)
+	}
+	if !strings.Contains(a.got[0].text, "<pre>b</pre>") {
+		t.Fatalf("-c ignored with --: %s", a.got[0].text)
+	}
+	if code := run([]string{"-n", "--", "echo hi"}); code != 0 {
+		t.Fatalf("note \"--\" must not switch to direct exec: %d", code)
+	}
+}
+
+func TestTokenCmdOnlyWhenSending(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "called")
+	a := setup(t, "TOKEN_CMD=\"touch "+marker+"; echo "+testToken+"\"\nCHAT_ID=1\nNOTIFY=failure\n")
+	if code := run([]string{"true"}); code != 0 || len(a.got) != 0 {
+		t.Fatalf("code=%d sent=%d", code, len(a.got))
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("TOKEN_CMD must not run when nothing is sent")
+	}
+	if code := run([]string{"false"}); code != 1 || len(a.got) != 1 {
+		t.Fatalf("code=%d sent=%d", code, len(a.got))
 	}
 }

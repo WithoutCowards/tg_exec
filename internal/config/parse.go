@@ -107,6 +107,9 @@ func parseValue(s string) (string, error) {
 		}
 		return s[1 : end+1], nil
 	}
+	if s[0] == '#' {
+		return "", nil // KEY= # comment
+	}
 	for i := 1; i < len(s); i++ {
 		if s[i] == '#' && (s[i-1] == ' ' || s[i-1] == '\t') {
 			s = s[:i]
