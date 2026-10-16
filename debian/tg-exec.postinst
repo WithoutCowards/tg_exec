@@ -1,9 +1,0 @@
-#!/bin/sh
-set -e
-if [ -f /etc/tg-exec/config.conf ]; then
-  chmod 600 /etc/tg-exec/config.conf || true
-fi
-if command -v gzip >/dev/null 2>&1; then
-  [ -f /usr/share/man/man1/tg-exec.1 ] && gzip -f /usr/share/man/man1/tg-exec.1 || true
-fi
-echo "tg-exec installed. Edit /etc/tg-exec/config.conf or create ~/.config/tg-exec/config.conf"
