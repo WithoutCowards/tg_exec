@@ -1,2 +1,9 @@
-.idea
-build
+.idea/
+.vscode/
+/build/
+/dist/
+/tg-exec
+*.deb
+*.rpm
+*.apk
+*.tar.gz

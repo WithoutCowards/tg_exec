@@ -1,0 +1,51 @@
+name: release
+
+# Push a tag like v2.0.0 → tests, binaries, deb/rpm/apk, SHA256SUMS, GitHub release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.7"
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+      - name: install nfpm
+        run: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.48.0
+      - name: build artifacts
+        run: VERSION="${GITHUB_REF_NAME#v}" scripts/dist.sh
+      - name: smoke-test the deb
+        run: |
+          sudo dpkg -i dist/tg-exec_amd64.deb
+          tg-exec --version | grep -F "${GITHUB_REF_NAME#v}"
+          test "$(stat -c %a /etc/tg-exec/config.conf)" = 600
+          TG_EXEC_CHAT_ID=1 tg-exec --dry-run -- true
+      - name: release notes
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          awk -v v="$v" '$0 ~ "^## " v "( |$)" {on=1; next} /^## / && on {exit} on' CHANGELOG.md > notes.md
+          cat >> notes.md <<'EOF'
+
+          ### Install
+          ```sh
+          curl -fsSL https://github.com/WithoutCowards/tg_exec/releases/latest/download/install.sh | sudo sh
+          sudo tg-exec --setup
+          ```
+          Packages: `.deb` (Debian/Ubuntu), `.rpm` (RHEL/Alma/Rocky/Fedora), `.apk` (Alpine), tarballs for Linux and macOS. Verify with `SHA256SUMS`.
+
+          More: https://runstack.ru/p/tg-exec
+          EOF
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "tg-exec ${GITHUB_REF_NAME#v}" --notes-file notes.md --verify-tag
